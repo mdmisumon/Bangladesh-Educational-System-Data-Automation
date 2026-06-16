@@ -1,14 +1,24 @@
 # Bangladesh Educational System Data Automation
 
-Automates Bangladesh Education Board result lookups and writes the extracted student information back into an Excel workbook.
+Automates Bangladesh Education Board result lookups and writes student result data back into an Excel workbook.
 
-The current script is built for the newer Education Board result site:
+The main script is:
+
+```text
+Result Data V2.py
+```
+
+It supports regular education-board results from:
 
 ```text
 https://www.educationboardresults.gov.bd/v2/home
 ```
 
-It reads student lookup data from `Result data.xlsx`, prompts you to solve the website CAPTCHA manually, submits the lookup to the current `/v2/getres` endpoint, and saves the returned result data into the same workbook.
+For Technical board rows, it uses the Bangladesh Technical Education Board result service:
+
+```text
+https://result.bteb.gov.bd/result-search
+```
 
 ## What It Extracts
 
@@ -20,23 +30,29 @@ For each valid row, the script fills these output columns:
 - `GPA`
 - `Date of Birth`
 
-## Workbook Format
-
-The workbook must be named:
+Date of birth values are normalized to Bangladesh format:
 
 ```text
-Result data.xlsx
+dd-mm-yyyy
 ```
 
-By default, the script looks for this file in the folder where the script is run. If it is not found there, it looks beside `Result Data.py`.
+The DOB cell is written as text so Excel does not convert it into a US-style date or another automatic date format.
+
+## Workbook Format
+
+By default, V2 looks for:
+
+```text
+CW All Student Document Info.xlsx
+```
 
 The first row must contain these headers:
 
 | Column | Purpose |
 | --- | --- |
-| `Exam` | Exam type, for example `SSC/Dakhil/Equivalent` |
-| `Passing Year` | Exam year, for example `2015` |
-| `Board` | Board name, for example `Dhaka` |
+| `Exam` | Exam type, for example `SSC/Dakhil/Equivalent` or `SSC/Dakhil (VOC)` |
+| `Passing Year` | Exam year, for example `2019` |
+| `Board` | Board name, for example `Dhaka` or `Technical` |
 | `Roll` | Student roll number |
 | `Reg` | Student registration number |
 | `Name` | Output field |
@@ -47,6 +63,23 @@ The first row must contain these headers:
 
 Rows with existing successful `Name` values are skipped by default. Use `--force` to reprocess them.
 
+## Technical Board Rows
+
+Rows where `Board` is `Technical` or `TEC` are sent to the BTEB public result service instead of the regular education-board endpoint.
+
+For common SSC/Dakhil vocational rows, the script can infer:
+
+- `27` for `SSC (Vocational)`
+- `77` for `Dakhil (Vocational)`
+- semester/class `2` for Class 10
+
+If inference is not enough, add optional columns to the workbook:
+
+| Optional Column | Example |
+| --- | --- |
+| `Curriculum Code` | `27` |
+| `Semester` or `Class` | `2` or `Class 10` |
+
 ## Requirements
 
 Install the Python packages used by the script:
@@ -55,37 +88,48 @@ Install the Python packages used by the script:
 pip install openpyxl requests beautifulsoup4
 ```
 
+Optional Gemini CAPTCHA support requires:
+
+```powershell
+pip install -U google-genai pillow
+```
+
 ## Usage
 
 Run from the project folder:
 
 ```powershell
-python "Result Data.py"
+python "Result Data V2.py"
 ```
 
 To reprocess rows that already have output values:
 
 ```powershell
-python "Result Data.py" --force
+python "Result Data V2.py" --force
 ```
 
 To use a workbook in another location:
 
 ```powershell
-python "Result Data.py" --file "C:\path\to\Result data.xlsx"
+python "Result Data V2.py" --file "C:\path\to\CW All Student Document Info.xlsx"
 ```
 
-To save CAPTCHA images without opening them automatically:
+To provide a Gemini API key:
 
 ```powershell
-python "Result Data.py" --no-open-captcha
+python "Result Data V2.py" --gemini-api-key "YOUR_KEY"
+```
+
+Or set an environment variable:
+
+```powershell
+$env:GEMINI_API_KEY="YOUR_KEY"
+python "Result Data V2.py"
 ```
 
 ## CAPTCHA Workflow
 
-The Education Board website now uses an image CAPTCHA. The script does not bypass this protection.
-
-For each row that needs processing, the script:
+For regular education-board rows, the site uses an image CAPTCHA. If no Gemini API key is provided, the script uses a manual flow:
 
 1. Opens the result homepage to create a valid session.
 2. Downloads the CAPTCHA image.
@@ -96,26 +140,34 @@ For each row that needs processing, the script:
 
 If the CAPTCHA is incorrect, the script retries up to three times by default.
 
-You can change the attempt count:
-
-```powershell
-python "Result Data.py" --max-captcha-attempts 5
-```
+Technical-board rows use the BTEB public result API and do not use this CAPTCHA flow.
 
 ## Useful Options
 
 ```text
 --file PATH                 Use a specific workbook path.
+--gemini-api-key KEY        Use Gemini API for CAPTCHA OCR.
 --force                     Reprocess rows that already contain a successful Name value.
 --captcha-dir PATH          Save CAPTCHA images in a custom folder.
 --no-open-captcha           Do not open CAPTCHA images automatically.
+--no-pause                  Exit immediately instead of waiting for Enter at the end.
 --max-captcha-attempts N    Set CAPTCHA retry limit per row. Default: 3.
 --delay SECONDS             Delay between successful lookups. Default: 2.
 ```
 
+## Terminal Behavior
+
+The script waits at the end with:
+
+```text
+Finished. Press Enter to close this window...
+```
+
+This keeps the terminal open after a double-click run so you can read the result summary. Use `--no-pause` to disable this behavior.
+
 ## Notes
 
-- Keep `Result data.xlsx` closed while the script is saving results.
+- Keep the workbook closed while the script is saving results.
 - Generated CAPTCHA images and Python cache files are ignored by Git.
-- The `website structure/` folder is local reference material and is not required to run the script.
-- The script supports the current `/v2` result flow and may need updates if the Education Board website changes again.
+- Website-structure folders are local reference material and are not required to run the script.
+- The script supports the current education-board `/v2` flow and the current BTEB public result flow. It may need updates if either website changes again.
