@@ -36,7 +36,7 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"
 # ==============================================================================
 
 
-WORKBOOK_NAME = "CW All Student Document Info.xlsx"
+WORKBOOK_NAME = "Result data.xlsx"
 
 BASE_URL = "https://www.educationboardresults.gov.bd"
 HOME_URL = f"{BASE_URL}/v2/home"
