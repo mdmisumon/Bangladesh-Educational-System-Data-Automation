@@ -8,6 +8,12 @@ The main script is:
 Result Data V2.py
 ```
 
+Current script version:
+
+```text
+2.1.0
+```
+
 It supports regular education-board results from:
 
 ```text
@@ -43,7 +49,7 @@ The DOB cell is written as text so Excel does not convert it into a US-style dat
 By default, V2 looks for:
 
 ```text
-CW All Student Document Info.xlsx
+Result data.xlsx
 ```
 
 The first row must contain these headers:
@@ -61,7 +67,7 @@ The first row must contain these headers:
 | `GPA` | Output field |
 | `Date of Birth` | Output field |
 
-Rows with existing successful `Name` values are skipped by default. Use `--force` to reprocess them.
+Rows with any existing `Name` value are skipped by default, including rows marked with an error such as `Result Error`. Clear the `Name` cell for a row if you want the script to check it again. Use `--force` to reprocess rows even when `Name` is already filled.
 
 ## Technical Board Rows
 
@@ -108,10 +114,16 @@ To reprocess rows that already have output values:
 python "Result Data V2.py" --force
 ```
 
+To print the script version:
+
+```powershell
+python "Result Data V2.py" --version
+```
+
 To use a workbook in another location:
 
 ```powershell
-python "Result Data V2.py" --file "C:\path\to\CW All Student Document Info.xlsx"
+python "Result Data V2.py" --file "C:\path\to\Result data.xlsx"
 ```
 
 To provide a Gemini API key:
@@ -151,11 +163,16 @@ Technical-board rows use the BTEB public result API and do not use this CAPTCHA 
 --captcha-dir PATH          Save CAPTCHA images in a custom folder.
 --no-open-captcha           Do not open CAPTCHA images automatically.
 --no-pause                  Exit immediately instead of waiting for Enter at the end.
+--no-enter-pause            Disable the Enter key pause/resume checkpoint during processing.
 --max-captcha-attempts N    Set CAPTCHA retry limit per row. Default: 3.
 --delay SECONDS             Delay between successful lookups. Default: 2.
 ```
 
 ## Terminal Behavior
+
+Results are saved to the workbook immediately after each row writes either extracted data or an error status. Progress is not held until the end of the full run.
+
+While the script is processing rows, press Enter to save current progress and pause at the next safe checkpoint. Press Enter again to resume. Use `--no-enter-pause` to disable this behavior.
 
 The script waits at the end with:
 

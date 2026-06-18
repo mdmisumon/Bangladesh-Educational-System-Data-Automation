@@ -36,6 +36,7 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"
 # ==============================================================================
 
 
+VERSION = "2.1.0"
 WORKBOOK_NAME = "Result data.xlsx"
 
 BASE_URL = "https://www.educationboardresults.gov.bd"
@@ -651,12 +652,83 @@ def normalize_existing_dob_cells(sheet: Any, column_map: dict[str, int]) -> None
         cell.value = normalize_date_of_birth(value)
 
 
+def save_workbook_progress(
+    workbook: Any,
+    workbook_path: Path,
+    sheet: Any,
+    column_map: dict[str, int],
+) -> bool:
+    normalize_existing_dob_cells(sheet, column_map)
+    try:
+        workbook.save(workbook_path)
+        return True
+    except PermissionError:
+        print(f"\nError saving Excel file. Close '{workbook_path.name}' if it is open, then run again.")
+        return False
+    except Exception as exc:
+        print(f"\nError saving Excel file: {exc}")
+        return False
+
+
+def consume_enter_keypress() -> bool:
+    if os.name != "nt":
+        return False
+
+    try:
+        import msvcrt
+    except ImportError:
+        return False
+
+    pressed = False
+    try:
+        while msvcrt.kbhit():
+            key = msvcrt.getwch()
+            if key in ("\r", "\n"):
+                pressed = True
+        return pressed
+    except OSError:
+        return False
+
+
+def pause_if_enter_requested(
+    args: argparse.Namespace,
+    workbook: Any,
+    workbook_path: Path,
+    sheet: Any,
+    column_map: dict[str, int],
+) -> bool:
+    if args.no_enter_pause or not consume_enter_keypress():
+        return True
+
+    print("\nPause requested. Saving current progress before pausing...")
+    if not save_workbook_progress(workbook, workbook_path, sheet, column_map):
+        return False
+
+    try:
+        input("Paused. Press Enter to resume...")
+    except EOFError:
+        pass
+    return True
+
+
+def save_progress_and_handle_pause(
+    args: argparse.Namespace,
+    workbook: Any,
+    workbook_path: Path,
+    sheet: Any,
+    column_map: dict[str, int],
+) -> bool:
+    if not save_workbook_progress(workbook, workbook_path, sheet, column_map):
+        return False
+    return pause_if_enter_requested(args, workbook, workbook_path, sheet, column_map)
+
+
 def should_skip_row(sheet: Any, row_idx: int, column_map: dict[str, int], force: bool) -> bool:
     if force:
         return False
 
     current_name = excel_text(sheet.cell(row=row_idx, column=column_map["Name"]).value)
-    return bool(current_name and current_name not in ERROR_STATUSES)
+    return bool(current_name)
 
 
 def extract_results_to_excel(args: argparse.Namespace) -> int:
@@ -697,8 +769,12 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
     session = create_session()
     bteb_session = create_bteb_session()
 
+    print(f"Result Data V2 version {VERSION}")
     print(f"Using workbook: {workbook_path}")
     print("Starting data extraction with the education board v2 result service.")
+    print("Rows with any existing Name value are skipped. Clear the Name cell to retry a row.")
+    if not args.no_enter_pause:
+        print("Press Enter during processing to save progress and pause at the next safe checkpoint.")
 
     for row_idx in range(2, sheet.max_row + 1):
         values = {
@@ -712,17 +788,22 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
         if all(not value for value in values.values()):
             continue
 
+        if not pause_if_enter_requested(args, workbook, workbook_path, sheet, column_map):
+            return 1
+
         print(f"\n--- Processing Row {row_idx} ---")
 
         if should_skip_row(sheet, row_idx, column_map, args.force):
             current_name = sheet.cell(row=row_idx, column=column_map["Name"]).value
-            print(f"Skipping row {row_idx}: Name already present ('{current_name}').")
+            print(f"Skipping row {row_idx}: Name already present ('{current_name}'). Clear it to retry.")
             continue
 
         missing = [name for name, value in values.items() if not value]
         if missing:
             print(f"Skipping row {row_idx}: Missing input data: {', '.join(missing)}")
             write_error(sheet, row_idx, column_map, "Missing Input Data")
+            if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+                return 1
             continue
 
         mapped_exam = EXAM_TYPE_MAPPING.get(normalize_key(values["exam"]))
@@ -731,6 +812,8 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
         if not mapped_board:
             print(f"Skipping row {row_idx}: Unknown Board '{values['board']}'.")
             write_error(sheet, row_idx, column_map, "Unknown Board")
+            if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+                return 1
             continue
 
         try:
@@ -759,6 +842,8 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
                 if not mapped_exam:
                     print(f"Skipping row {row_idx}: Unknown Exam Type '{values['exam']}'.")
                     write_error(sheet, row_idx, column_map, "Unknown Exam Type")
+                    if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+                        return 1
                     continue
 
                 result = lookup_result(
@@ -778,17 +863,25 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
         except requests.RequestException as exc:
             print(f"HTTP error for row {row_idx}: {exc}")
             write_error(sheet, row_idx, column_map, "HTTP Error")
+            if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+                return 1
             continue
         except LookupErrorWithStatus as exc:
             print(f"{exc.status} for row {row_idx}: {exc.message}")
             write_error(sheet, row_idx, column_map, exc.status)
+            if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+                return 1
             continue
         except KeyboardInterrupt:
             print("\nStopped by user. Saving progress before exiting.")
+            if not save_workbook_progress(workbook, workbook_path, sheet, column_map):
+                return 1
             break
         except Exception as exc:
             print(f"Unexpected error for row {row_idx}: {exc}")
             write_error(sheet, row_idx, column_map, "Extraction Error")
+            if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+                return 1
             continue
 
         write_result(sheet, row_idx, column_map, result)
@@ -797,17 +890,11 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
             f"Name='{result.name}', Father='{result.father_name}', GPA='{result.gpa}', "
             f"DoB='{result.date_of_birth}'"
         )
+        if not save_progress_and_handle_pause(args, workbook, workbook_path, sheet, column_map):
+            return 1
         time.sleep(args.delay)
 
-    normalize_existing_dob_cells(sheet, column_map)
-
-    try:
-        workbook.save(workbook_path)
-    except PermissionError:
-        print(f"\nError saving Excel file. Close '{workbook_path.name}' if it is open, then run again.")
-        return 1
-    except Exception as exc:
-        print(f"\nError saving Excel file: {exc}")
+    if not save_workbook_progress(workbook, workbook_path, sheet, column_map):
         return 1
 
     print(f"\nData extraction complete. Results saved to '{workbook_path}'")
@@ -827,13 +914,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Fetch Bangladesh Education Board results from the current v2 website "
-            "and write them into Result data.xlsx."
+            f"and write them into {WORKBOOK_NAME}."
         )
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
         "--file",
         help=(
-            "Workbook path. Defaults to 'Result data.xlsx' in the current working directory, "
+            f"Workbook path. Defaults to '{WORKBOOK_NAME}' in the current working directory, "
             "then beside this script."
         ),
     )
@@ -844,7 +932,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Reprocess rows even when the Name column already contains a successful value.",
+        help="Reprocess rows even when the Name column already contains a value.",
     )
     parser.add_argument(
         "--captcha-dir",
@@ -859,6 +947,11 @@ def parse_args() -> argparse.Namespace:
         "--no-pause",
         action="store_true",
         help="Exit immediately after finishing instead of waiting for Enter.",
+    )
+    parser.add_argument(
+        "--no-enter-pause",
+        action="store_true",
+        help="Disable the Enter key pause/resume checkpoint while processing rows.",
     )
     parser.add_argument(
         "--max-captcha-attempts",
