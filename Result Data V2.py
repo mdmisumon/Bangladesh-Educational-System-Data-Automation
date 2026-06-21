@@ -16,6 +16,15 @@ import requests
 from bs4 import BeautifulSoup
 from openpyxl.utils.datetime import from_excel
 
+# Optional import for the education-board browser verification page
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PlaywrightTimeoutError = TimeoutError
+    PLAYWRIGHT_AVAILABLE = False
+
 # Optional imports for Gemini Auto-Captcha
 try:
     from google import genai
@@ -36,13 +45,14 @@ GEMINI_MODEL = "gemini-3.1-flash-lite"
 # ==============================================================================
 
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 WORKBOOK_NAME = "Result data.xlsx"
 
 BASE_URL = "https://www.educationboardresults.gov.bd"
 HOME_URL = f"{BASE_URL}/v2/home"
 CAPTCHA_URL = f"{BASE_URL}/v2/captcha"
 RESULT_URL = f"{BASE_URL}/v2/getres"
+CHALLENGE_PATH = "/_challenge-engine"
 
 BTEB_BASE_URL = "https://result.bteb.gov.bd"
 BTEB_SEARCH_URL = f"{BTEB_BASE_URL}/result-search"
@@ -247,6 +257,124 @@ def create_session() -> requests.Session:
     return session
 
 
+def is_challenge_response(response: requests.Response) -> bool:
+    url = response.url.lower()
+    if CHALLENGE_PATH in url:
+        return True
+
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "text/html" not in content_type:
+        return False
+
+    text = response.text.lower()
+    return "verifying your browser" in text or CHALLENGE_PATH in text
+
+
+def is_image_response(response: requests.Response) -> bool:
+    content_type = response.headers.get("Content-Type", "").lower()
+    return response.ok and "image" in content_type
+
+
+def launch_verification_browser(playwright: Any, headless: bool) -> Any:
+    launch_options = [
+        {"channel": "msedge", "headless": headless},
+        {"channel": "chrome", "headless": headless},
+        {"headless": headless},
+    ]
+
+    last_error: Exception | None = None
+    for options in launch_options:
+        try:
+            return playwright.chromium.launch(**options)
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Could not launch a Chromium browser: {last_error}")
+
+
+def page_has_result_form(page: Any) -> bool:
+    try:
+        return bool(page.locator("#form, #captcha_img, select#board, select#exam").count())
+    except Exception:
+        return False
+
+
+def copy_browser_cookies_to_session(session: requests.Session, cookies: list[dict[str, Any]]) -> None:
+    for cookie in cookies:
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+        session.cookies.set(
+            name,
+            value,
+            domain=cookie.get("domain"),
+            path=cookie.get("path", "/"),
+        )
+
+
+def verify_education_board_session_with_browser(
+    session: requests.Session,
+    *,
+    timeout_seconds: int,
+    headless: bool,
+) -> None:
+    if not PLAYWRIGHT_AVAILABLE:
+        raise LookupErrorWithStatus(
+            "Browser Verification Required",
+            "The education-board site returned its browser verification page. "
+            "Install Playwright with 'pip install playwright' and run "
+            "'python -m playwright install chromium', then run the script again.",
+        )
+
+    timeout_ms = max(5, timeout_seconds) * 1000
+    print("Education-board browser verification required. Opening a browser session...")
+
+    try:
+        with sync_playwright() as playwright:
+            browser = None
+            context = None
+            browser = launch_verification_browser(playwright, headless=headless)
+            try:
+                context = browser.new_context()
+                page = context.new_page()
+                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+
+                deadline = time.monotonic() + timeout_seconds
+                while time.monotonic() < deadline:
+                    if CHALLENGE_PATH not in page.url and page_has_result_form(page):
+                        break
+                    page.wait_for_timeout(500)
+
+                if not page_has_result_form(page):
+                    if headless:
+                        raise LookupErrorWithStatus(
+                            "Browser Verification Required",
+                            "The headless browser did not reach the result form. "
+                            "Run again without --headless-browser-verify so the verification window can be shown.",
+                        )
+                    input(
+                        "Complete the browser verification if needed. "
+                        "When the result form is visible, press Enter here..."
+                    )
+
+                copy_browser_cookies_to_session(session, context.cookies(BASE_URL))
+            finally:
+                if context:
+                    context.close()
+                if browser:
+                    browser.close()
+    except PlaywrightTimeoutError as exc:
+        raise LookupErrorWithStatus(
+            "Browser Verification Required",
+            f"The browser verification page did not finish within {timeout_seconds} seconds: {exc}",
+        ) from exc
+    except RuntimeError as exc:
+        raise LookupErrorWithStatus("Browser Verification Required", str(exc)) from exc
+
+    print("Browser verification complete. Continuing with the regular CAPTCHA flow.")
+
+
 def create_bteb_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -355,8 +483,29 @@ def open_captcha_image(path: Path) -> None:
         print(f"Could not open CAPTCHA image automatically: {exc}")
 
 
-def fetch_captcha(session: requests.Session, captcha_dir: Path, row_idx: int) -> Path:
-    session.get(HOME_URL, timeout=60).raise_for_status()
+def fetch_captcha(
+    session: requests.Session,
+    captcha_dir: Path,
+    row_idx: int,
+    *,
+    allow_browser_verify: bool,
+    browser_verify_timeout: int,
+    headless_browser_verify: bool,
+) -> Path:
+    home_response = session.get(HOME_URL, timeout=60)
+    if is_challenge_response(home_response):
+        if not allow_browser_verify:
+            raise LookupErrorWithStatus(
+                "Browser Verification Required",
+                "The education-board site returned its browser verification page.",
+            )
+        verify_education_board_session_with_browser(
+            session,
+            timeout_seconds=browser_verify_timeout,
+            headless=headless_browser_verify,
+        )
+    else:
+        home_response.raise_for_status()
 
     response = session.get(
         CAPTCHA_URL,
@@ -364,11 +513,33 @@ def fetch_captcha(session: requests.Session, captcha_dir: Path, row_idx: int) ->
         headers={"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
         timeout=60,
     )
+
+    if is_challenge_response(response):
+        if not allow_browser_verify:
+            raise LookupErrorWithStatus(
+                "Browser Verification Required",
+                "The CAPTCHA endpoint returned the browser verification page.",
+            )
+        verify_education_board_session_with_browser(
+            session,
+            timeout_seconds=browser_verify_timeout,
+            headless=headless_browser_verify,
+        )
+        response = session.get(
+            CAPTCHA_URL,
+            params={"t": str(int(time.time() * 1000))},
+            headers={"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
+            timeout=60,
+        )
+
     response.raise_for_status()
 
-    content_type = response.headers.get("Content-Type", "")
-    if "image" not in content_type.lower():
-        raise LookupErrorWithStatus("Captcha Not Found", "The CAPTCHA endpoint did not return an image.")
+    if not is_image_response(response):
+        content_type = response.headers.get("Content-Type", "unknown")
+        raise LookupErrorWithStatus(
+            "Captcha Not Found",
+            f"The CAPTCHA endpoint did not return an image. Content-Type was '{content_type}'.",
+        )
 
     captcha_dir.mkdir(parents=True, exist_ok=True)
     captcha_path = captcha_dir / f"captcha_row_{row_idx}.png"
@@ -579,11 +750,21 @@ def lookup_result(
     max_attempts: int,
     use_api: bool,
     api_key: str | None,
+    allow_browser_verify: bool,
+    browser_verify_timeout: int,
+    headless_browser_verify: bool,
 ) -> StudentResult:
     last_error: LookupErrorWithStatus | None = None
 
     for attempt in range(1, max_attempts + 1):
-        captcha_path = fetch_captcha(session, captcha_dir, row_idx)
+        captcha_path = fetch_captcha(
+            session,
+            captcha_dir,
+            row_idx,
+            allow_browser_verify=allow_browser_verify,
+            browser_verify_timeout=browser_verify_timeout,
+            headless_browser_verify=headless_browser_verify,
+        )
         captcha = None
 
         if use_api and api_key:
@@ -773,6 +954,8 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
     print(f"Using workbook: {workbook_path}")
     print("Starting data extraction with the education board v2 result service.")
     print("Rows with any existing Name value are skipped. Clear the Name cell to retry a row.")
+    if not args.no_browser_verify:
+        print("Browser verification bootstrap is enabled for the education-board challenge page.")
     if not args.no_enter_pause:
         print("Press Enter during processing to save progress and pause at the next safe checkpoint.")
 
@@ -859,6 +1042,9 @@ def extract_results_to_excel(args: argparse.Namespace) -> int:
                     max_attempts=args.max_captcha_attempts,
                     use_api=use_api,
                     api_key=api_key,
+                    allow_browser_verify=not args.no_browser_verify,
+                    browser_verify_timeout=args.browser_verify_timeout,
+                    headless_browser_verify=args.headless_browser_verify,
                 )
         except requests.RequestException as exc:
             print(f"HTTP error for row {row_idx}: {exc}")
@@ -942,6 +1128,22 @@ def parse_args() -> argparse.Namespace:
         "--no-open-captcha",
         action="store_true",
         help="Save CAPTCHA images without opening them automatically.",
+    )
+    parser.add_argument(
+        "--no-browser-verify",
+        action="store_true",
+        help="Disable the browser verification bootstrap for the education-board challenge page.",
+    )
+    parser.add_argument(
+        "--browser-verify-timeout",
+        type=int,
+        default=45,
+        help="Seconds to wait for the education-board browser verification page. Default: 45.",
+    )
+    parser.add_argument(
+        "--headless-browser-verify",
+        action="store_true",
+        help="Run the browser verification bootstrap without showing a browser window.",
     )
     parser.add_argument(
         "--no-pause",

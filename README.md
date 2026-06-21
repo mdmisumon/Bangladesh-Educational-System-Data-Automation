@@ -11,7 +11,7 @@ Result Data V2.py
 Current script version:
 
 ```text
-2.1.0
+2.2.0
 ```
 
 It supports regular education-board results from:
@@ -94,6 +94,13 @@ Install the Python packages used by the script:
 pip install openpyxl requests beautifulsoup4
 ```
 
+The regular education-board site may show an automatic browser verification page before the result form. To let the script open a real browser for that verification and then continue the normal CAPTCHA flow, install Playwright:
+
+```powershell
+pip install playwright
+python -m playwright install chromium
+```
+
 Optional Gemini CAPTCHA support requires:
 
 ```powershell
@@ -141,14 +148,17 @@ python "Result Data V2.py"
 
 ## CAPTCHA Workflow
 
-For regular education-board rows, the site uses an image CAPTCHA. If no Gemini API key is provided, the script uses a manual flow:
+For regular education-board rows, the site may first show an automatic browser verification page. When that happens, the script opens a browser window, waits for the real result form, copies the verified session cookies back into the script, and then continues.
+
+The regular site also uses an image CAPTCHA. If no Gemini API key is provided, the script uses a manual flow:
 
 1. Opens the result homepage to create a valid session.
-2. Downloads the CAPTCHA image.
-3. Saves it to `.captchas/`.
-4. Opens the image for you.
-5. Prompts you to type the visible digits.
-6. Submits the result lookup.
+2. Completes browser verification if the site requires it.
+3. Downloads the CAPTCHA image.
+4. Saves it to `.captchas/`.
+5. Opens the image for you.
+6. Prompts you to type the visible digits.
+7. Submits the result lookup.
 
 If the CAPTCHA is incorrect, the script retries up to three times by default.
 
@@ -162,6 +172,9 @@ Technical-board rows use the BTEB public result API and do not use this CAPTCHA 
 --force                     Reprocess rows that already contain a successful Name value.
 --captcha-dir PATH          Save CAPTCHA images in a custom folder.
 --no-open-captcha           Do not open CAPTCHA images automatically.
+--no-browser-verify         Disable the browser verification bootstrap.
+--browser-verify-timeout N  Seconds to wait for browser verification. Default: 45.
+--headless-browser-verify   Run browser verification without showing a browser window.
 --no-pause                  Exit immediately instead of waiting for Enter at the end.
 --no-enter-pause            Disable the Enter key pause/resume checkpoint during processing.
 --max-captcha-attempts N    Set CAPTCHA retry limit per row. Default: 3.
